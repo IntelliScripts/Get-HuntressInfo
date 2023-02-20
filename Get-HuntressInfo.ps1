@@ -140,7 +140,7 @@ function Get-HuntressInfo {
         function Install {
             if ( !(Test-Path $($HuntressPath)) -or ((Get-ChildItem $HuntressPath).CreationTime -lt (Get-Date).AddDays(-60)) ) {
                 Write-Verbose "Huntress installer not present at 'C:\Windows\LTSvc\Packages\Huntress' or present but older than 60 days.`nDownloading the installer."
-                (New-Object Net.WebClient).DownloadFile("https://huntress.io/download/$(ACTKey)", $env:temp + '/HuntressInstaller.exe')
+                (New-Object Net.WebClient).DownloadFile("https://huntress.io/download/$($ACTKey)", $env:temp + '/HuntressInstaller.exe')
                 if ((Get-Content $env:temp\HuntressInstaller.exe) -match "WELCOME, PLEASE LOGIN") {
                     Write-Warning "The downloaded installer is corrupt and unreadable. Please double-check the organizational key you entered, and then re-run the script."
                     break
