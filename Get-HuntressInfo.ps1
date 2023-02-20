@@ -33,7 +33,13 @@ function Get-HuntressInfo {
         
         [Switch]$UninstallHuntress,
 
-        [Switch]$ReinstallHuntress
+        [Switch]$ReinstallHuntress,
+
+        [Switch]$RestartServices,
+
+        [Switch]$DefaultOverride,
+
+        [Switch]$OpenHuntressLog
     )
     
     begin {}
@@ -41,6 +47,11 @@ function Get-HuntressInfo {
     process {
         # $Color = $Host.PrivateData.WarningForegroundColor.ToString()
         # $Host.PrivateData.WarningForegroundColor = "Green"
+
+        if ($OpenHuntressLog) {
+            notepad.exe C:\Program Files\Huntress\HuntressAgent.log
+            break
+        }
 
         # Check for admin rights
         if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -54,7 +65,7 @@ function Get-HuntressInfo {
                 Write-Host -ForegroundColor Green "Please launch an admin shell and try again.`nExiting script."
                 Break
             }
-        }
+        } # if not admin
 
         $HuntressPath = 'C:\Windows\LTSvc\Packages\Huntress\HuntressInstaller.exe'
         $UninstallPath = "C:\Program Files\Huntress\Uninstall.exe"
@@ -76,6 +87,7 @@ function Get-HuntressInfo {
                     'ORG key'  = $RegInfo.OrganizationKey
                     'Tags'     = $RegInfo.Tags
                 }
+                Write-Debug "RegInfo Props gathered"
                 $Obj = New-Object -TypeName psobject -Property $Props
 
                 # format the install parameters pulled from the Registry (and make available script-wide)
@@ -126,8 +138,8 @@ function Get-HuntressInfo {
         } # function Uninstall
 
         function Install {
-            if ( !(Test-Path $($HuntressPath)) ) {
-                Write-Verbose "Huntress installer not present at 'C:\Windows\LTSvc\Packages\Huntress'.`nDownloading the installer."
+            if ( !(Test-Path $($HuntressPath)) -or ((Get-ChildItem $HuntressPath).CreationTime -lt (Get-Date).AddDays(-60)) ) {
+                Write-Verbose "Huntress installer not present at 'C:\Windows\LTSvc\Packages\Huntress' or present but older than 60 days.`nDownloading the installer."
                 (New-Object Net.WebClient).DownloadFile("https://huntress.io/download/$(ACTKey)", $env:temp + '/HuntressInstaller.exe')
                 if ((Get-Content $env:temp\HuntressInstaller.exe) -match "WELCOME, PLEASE LOGIN") {
                     Write-Warning "The downloaded installer is corrupt and unreadable. Please double-check the organizational key you entered, and then re-run the script."
@@ -164,7 +176,7 @@ function Get-HuntressInfo {
                 } # if no $ReinstallHuntress
             } # else if Test-Path
             Write-Verbose "Waiting for the installation to complete"
-            for ( $i = 0; $i -lt 3; $i++) {
+            for ( $i = 0; $i -lt 5; $i++) {
                 if (!(Get-Process HuntressInstaller -ErrorAction SilentlyContinue)) {
                     if ((Get-Service HuntressAgent -ErrorAction SilentlyContinue).status -ne 'Running') {
                         Start-Service HuntressAgent -ErrorAction SilentlyContinue
@@ -205,9 +217,9 @@ function Get-HuntressInfo {
 
         function Test-Filter {
             Write-Verbose "Testing for the presence of the Techloq, Gentech and Meshimer content filters"
-            $RegFilter = (Get-ItemProperty "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" | 
+            $RegFilter = (Get-ItemProperty "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | 
                 Where-Object { $_.DisplayName -like '*Techloq*' -or $_.DisplayName -like '*GenTech*' -or $_.DisplayName -like '*Meshimer*' }).displayname | Select-Object -Unique
-            Write-Debug "Filter = $RegFilter"
+            Write-Debug "RegFilter info gathered"
             switch -wildcard ($RegFilter) {
                 '*Techloq*' { $Script:Filter = "Techloq"; $Script:FilterName = "Techloq" }
                 '*Gentech*' { $Script:Filter = "Livigent"; $Script:FilterName = "Gentech" }
@@ -231,11 +243,16 @@ function Get-HuntressInfo {
             Write-Verbose "Testing connection to huntress.io for SSL interception using the TestHuntressConnection command-line tool"
             if (!(Test-Path "C:\Windows\Temp\TestHuntressConnection.exe")) {
                 Write-Verbose "Tool not present at 'C:\Windows\Temp\TestHuntressConnection.exe'. Dowloading tool from our LTShare.."
-            (New-Object Net.WebClient).DownloadFile("https://labtech.intellicomp.net/labtech/transfer/Tools/TestHuntressConnection.exe", "C:\Windows\Temp\TestHuntressConnection.exe")
-                Write-Verbose "Download complete"
+                (New-Object Net.WebClient).DownloadFile("https://labtech.intellicomp.net/labtech/transfer/Tools/TestHuntressConnection.exe", "C:\Windows\Temp\TestHuntressConnection.exe")
+                if (Test-Path "C:\Windows\Temp\TestHuntressConnection.exe") {
+                    Write-Verbose "Download complete"
+                }
+                else {
+                    Write-Verbose "Download not successful"
+                }
             }
             $TestHuntressConnection = & "C:\Windows\Temp\TestHuntressConnection.exe"
-            Write-Host -ForegroundColor Green "Results from the TestHuntressConnection command-line tool:"
+            Write-Host -ForegroundColor Green "`nResults from the TestHuntressConnection command-line tool:"
             if (($TestHuntressConnection | Select-String "- Connection") -notlike "*Connection Successful*") {
                 Write-Warning "Huntress Connection Test failed"
                 $TestHuntressConnection | Where-Object { $_ -notmatch "Please see" -and $_ -notmatch "For help" }
@@ -247,8 +264,18 @@ function Get-HuntressInfo {
 
         function Test-SSL {
             param (
-                [String]$url = "https://www.huntress.io/",
+                [ValidateScript({
+                        if ($_ -match "^http[s]*:\/\/") {
+                            $true
+                        }
+                        else {
+                            Throw "The URL $_ was entered in an incorrect format. Please append 'https://' to the URL and try again."
+                        }
+                    })]
+                [String]$url = "https://huntress.io/",
+
                 [string]$Program = "Huntress",
+                
                 [Switch]$OutputObj
             )
             Write-Verbose "Testing the SSL cert returned by the huntress.io domain"
@@ -262,16 +289,21 @@ function Get-HuntressInfo {
             # Populate the $req.ServicePoint.Certificate property
             try { $req.GetResponse() | Out-Null } catch {}
             # Grab the cert issuer
-            $Script:Issuer = (($req.ServicePoint.Certificate.Issuer.Split(',')) | Select-String "O=").ToString().Substring(3)
+            if ($req.ServicePoint.Certificate) {
+                $Script:Issuer = (($req.ServicePoint.Certificate.Issuer.Split(',')) | Select-String "O=").ToString().Substring(3)   
+            }
+            Write-Debug "Huntress.io cert issuer info retrieved.`n$Issuer"
             if ($OutputObj) {
-                $Issuer
+                $req.ServicePoint.Certificate
             }
-            Write-Host -ForegroundColor Green "`nThe SSL cert returned by the huntress.io domain (needs to be from DigiCert):"
-            Write-Host "Issuer: $Issuer"
-            if ($Issuer -notlike "*DigiCert*") {
-                $Script:Status = 1
+            else {
+                Write-Host -ForegroundColor Green "`nThe SSL cert returned by the $url domain:"
+                Write-Host "Issuer: $Issuer"
                 Write-Host "Complete issuer info: $($req.ServicePoint.Certificate.Issuer)"
-            }
+                if ($Issuer -notlike "*DigiCert*") {
+                    $Script:Status = 1
+                }
+            } # if !$OutputObj
         } # function Test-SSL
 
         if ($UninstallHuntress) {
@@ -287,6 +319,12 @@ function Get-HuntressInfo {
             Uninstall
             Install
         } # if $ReinstallHuntress
+
+        if ($RestartServices) {
+            Write-Host -ForegroundColor Green "Restarting services"
+            Get-Service Huntress* -ErrorAction SilentlyContinue | Restart-Service -PassThru
+            break
+        }
 
         # else {
         if ( (Get-Process HuntressInstaller -ErrorAction SilentlyContinue).Count -gt 1 ) {
@@ -308,8 +346,8 @@ function Get-HuntressInfo {
         } # if Count -gt 1
 
         Write-Verbose "Retrieving services, processes and Registry info"
-        $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType
-        $Processes = Get-Process Huntress* | Select-Object Name, Description, @{n = "AgentVersion"; e = { $_.FileVersion } }, StartTime | Format-Table
+        $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType -AutoSize
+        $Processes = Get-Process Huntress* | Select-Object Name, Description, @{n = "AgentVersion"; e = { $_.FileVersion } }, StartTime | Format-Table -AutoSize
         Write-Host -ForegroundColor Green "Huntress Services:"
         $Services
         if (!(Get-Service Huntress*)) {
@@ -332,7 +370,7 @@ function Get-HuntressInfo {
             Write-Warning "`nThe installer is present at $($HuntressPath), but is smaller in size than it should be.`nA DNS filter may be blocking the Huntress installer from downloading. To confirm, examine the contents of the installer in notepad, or simply visit 'huntress.io' in a browser."
         }
 
-        if (!$UninstallHuntress) {
+        if (!$UninstallHuntress -and !$DefaultOverride) {
             # Checking the check.log file
             Write-Verbose "Checking the 'Check.log' file for errors"
             if (Test-Path 'C:\Program Files\Huntress\Check.log' -ErrorAction SilentlyContinue) {
@@ -385,6 +423,7 @@ function Get-HuntressInfo {
 
             Test-Filter
 
+            Write-Host ""
             $AgentLog = Get-Content 'C:\Program Files\Huntress\HuntressAgent.Log' -ErrorAction SilentlyContinue | Select-Object -Last 3
             Write-Debug "AgentLog cert test"
             if ( ($Status -eq 1) -and ($FilterName) ) {
@@ -399,12 +438,36 @@ function Get-HuntressInfo {
                 } # else if filter present and Test-SSL returns warning but no cert errors
             } # if Test-SSL returns a warning and filter installed
             elseif ( ($Status -ne 1) -and ($FilterName) ) {
-                Write-Host -ForegroundColor Green "The $($FilterName) content filter is installed on this machine. The cert returned by huntress.io is from $Issuer. There are no current cert errors in the Huntress Agent Log file."
+                if ($AgentLog -match 'cert does not match pinned fingerprint') {
+                    Write-Host "The cert returned by Huntress.io is from Digicert but the log file still shows cert errors. The machine might therefore also not be in the Huntress portal."
+                    $RS = Read-Host "Restart services? (Y/N)"
+                    if ($RS -eq 'Y') {
+                        restart services
+                    } # if 'Y'
+                    elseif ($RS -eq 'N') {
+                        Write-Host "NOT restarting services.`Exiting script."
+                        break
+                    } # if 'N'
+                } # if cert is from Digicert but log file still showing cert errors 
+                else {
+                    Write-Host -ForegroundColor Green "The $($FilterName) content filter is installed on this machine. The cert returned by huntress.io is from $Issuer. There are no current cert errors in the Huntress Agent Log file."
+                } # if filter present but log file is fine
             } # if Test-SSL does NOT return a warning and filter installed
             
-            # test for non-SSL related errors in the last 3 entries of the HuntressAgent log (per what our Automate monitor looks at)
+            # test for non-SSL related errors in the last 3 entries of the HuntressAgent log
             Write-Verbose "Testing for general errors at the end of the HuntressAgent log"
             $Log = Get-Content 'C:\Program Files\Huntress\HuntressAgent.Log' -ErrorAction SilentlyContinue -Last 3
+            <#
+            # https://support.huntress.io/hc/en-us/articles/4413150910867-Huntress-Agent-Error-Codes-HuntressAgent-log-
+            switch -wildcard ($Log) {
+                "bad status code: 400" { "Bad Status code: 400 -- There's an issue with the Account or Organization Key" }
+                'level=error msg="(survey) post request - bad status code: 401' { $Err = 401; "Bad Status Code: 401 --Agent uninstalled from the portal (and uninstall task timed out-- ~30 days). Agent is orphaned. Uninstall and then reinstall." }
+                "(monitored_registry_keys) get request - bad status code: 401" { "The registry key for AgentID has been modified.Search for the machine name in the portal and pull what the AgentID should be. Replace the incorrect value in the registry and it should start after restarting the HuntressAgent service." }
+                "bad status code: 502" { "Bad Status Code: 502 Network Error -- The Host might not be connected to the Internet" }
+                "bad status code: 413" { "Bad Status code: 413 -- Survey is too large, check for excessive number of scheduled tasks or contact support." }
+            }
+            #>
+
             foreach ($L in $Log) {
                 if ($L -like '*x509: certificate signed by unknown authority*') {
                     Write-Warning "'Certificate signed by unknown authority' error."
@@ -428,6 +491,7 @@ function Get-HuntressInfo {
                     } # if $Answer -eq 'Y'
                     elseif ($Answer -eq 'N') {
                         Write-Host -ForegroundColor Green "Not restarting services"
+                        break
                     }
                 } # if cert signed by unknown authority
             } # foreach $L in $Log in original log
