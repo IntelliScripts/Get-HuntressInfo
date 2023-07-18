@@ -37,9 +37,13 @@ function Get-HuntressInfo {
 
         [Switch]$RestartServices,
 
+        [Switch]$TestServerConnection,
+
         [Switch]$DefaultOverride,
 
-        [Switch]$OpenHuntressLog
+        [Switch]$OpenHuntressLog,
+
+        [Switch]$OpenIE
     )
     
     begin {}
@@ -50,6 +54,12 @@ function Get-HuntressInfo {
 
         if ($OpenHuntressLog) {
             notepad.exe C:\Program Files\Huntress\HuntressAgent.log
+            break
+        }
+
+        # for testing the huntress.io cert backstage in IE
+        if ($OpenIE) {
+            & 'C:\Program Files\Internet Explorer\iexplore.exe'
             break
         }
 
@@ -146,10 +156,14 @@ function Get-HuntressInfo {
                     break
                 }
                 Write-Verbose "Download complete. Installer saved to $env:temp + '/HuntressInstaller.exe'."
-                Write-Verbose "Attempting to pull install parameters from the Registry (from previous install if relevant)"
-                Get-RegInfo -PromptForParams
+                Write-Verbose "Attempting to pull install parameters from the Registry (or from memory if the reinstall parameter was used)"
+                # the following if statement is added for when the Reinstall parameter is used and reg info exists, 
+                # so that the Install function doesn't re-run the Get-RegInfo function and overwrite the reg info already saved to memory from before the uninstall
+                if (!( ($RegInfo.AccountKey) -and ($RegInfo.OrganizationKey) -and ($RegInfo.Tags) )) {
+                    Get-RegInfo -PromptForParams
+                }
                 Write-Verbose "Running the installer"
-                Start-Process -FilePath "$env:temp\HuntressInstaller.exe" -ArgumentList "/ACCT_KEY=$ACTKey /ORG_KEY=$ORGKey /TAGS=$Site"
+                Start-Process -FilePath "$env:temp\HuntressInstaller.exe" -ArgumentList "/S /ACCT_KEY=$ACTKey /ORG_KEY=$ORGKey /TAGS=$Site"
             } # if !Test-Path
             else {
                 Write-Verbose "Attempting to pull install parameters from the Registry (or from memory if the reinstall parameter was used)"
@@ -176,7 +190,7 @@ function Get-HuntressInfo {
                 } # if no $ReinstallHuntress
             } # else if Test-Path
             Write-Verbose "Waiting for the installation to complete"
-            for ( $i = 0; $i -lt 5; $i++) {
+            for ( $i = 0; $i -lt 10; $i++) {
                 if (!(Get-Process HuntressInstaller -ErrorAction SilentlyContinue)) {
                     if ((Get-Service HuntressAgent -ErrorAction SilentlyContinue).status -ne 'Running') {
                         Start-Service HuntressAgent -ErrorAction SilentlyContinue
@@ -196,12 +210,12 @@ function Get-HuntressInfo {
                 } # if HuntressInstaller process running
             } # for $i
             if ((Get-Service HuntressAgent -ErrorAction SilentlyContinue).Status -eq 'Running') {
-                $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType
-                $Processes = Get-Process Huntress* | Format-Table Name, Description, FileVersion, StartTime
-                Write-Host -ForegroundColor Green "Installation Complete.`nProcesses:"
-                $Processes
-                Write-Host -ForegroundColor Green "Services:"
+                $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType -AutoSize
+                $Processes = Get-Process Huntress* | Format-Table Name, Description, FileVersion, StartTime -AutoSize
+                Write-Host -ForegroundColor Green "Installation Complete.`nServices:"
                 $Services
+                Write-Host -ForegroundColor Green "Processes:"
+                $Processes
                 Write-Host -ForegroundColor Green "Registry info:"
                 Get-RegInfo -OutputObj | Format-List
                 Write-Host -ForegroundColor Green "Exiting Script."
@@ -417,11 +431,27 @@ function Get-HuntressInfo {
                 Write-Warning "<<< Free space on the C: drive is very low. >>>"
             }
             
+            if ($TestServerConnection) {      
+                # test for restrictions on outgoing communication on port 443
+                # requires PowerShell version 4.0+
+                Write-Verbose "Testing connectivity from the end point to Huntress's cloud servers"
+                Write-Host -ForegroundColor Green "`nConnectivity test results (on port 443):"
+                $ProgressPreference = 'SilentlyContinue'
+                @("huntresscdn.com", "update.huntress.io", "huntress.io", "eetee.huntress.io", "huntress-installers.s3.amazonaws.com", "huntress-updates.s3.amazonaws.com", "huntress-uploads.s3.us-west-2.amazonaws.com", "huntress-user-uploads.s3.amazonaws.com", "huntress-rio.s3.amazonaws.com", "huntress-survey-results.s3.amazonaws.com", "notify.bugsnag.com") | 
+                Test-NetConnection -Port 443 | Select-Object @{n = 'CloudServers'; e = { $_.ComputerName } }, TcpTestSucceeded | Format-Table -AutoSize
+                $ProgressPreference = 'Continue'
+            }
+
             Test-HuntressConnection
             
             Test-SSL
 
             Test-Filter
+
+            Write-Verbose "Testing for buggy agent version 0.13.40 on 32-bit hosts"
+            if ( ((Get-Process HuntressAgent -ErrorAction SilentlyContinue | Select-Object -First 1).FileVersion -eq "0.13.40") -and ([Environment]::Is64BitOperatingSystem -eq $false) ) {
+                Write-Host -ForegroundColor Red "`nWARNING: This is a 32-bit host running Huntress Agent version 0.13.40. The update package for this version installs a 64-bit agent on 32-bit hosts.`nPlease reinstall/update Huntress."
+            }
 
             Write-Host ""
             $AgentLog = Get-Content 'C:\Program Files\Huntress\HuntressAgent.Log' -ErrorAction SilentlyContinue | Select-Object -Last 3
@@ -442,7 +472,9 @@ function Get-HuntressInfo {
                     Write-Host "The cert returned by Huntress.io is from Digicert but the log file still shows cert errors. The machine might therefore also not be in the Huntress portal."
                     $RS = Read-Host "Restart services? (Y/N)"
                     if ($RS -eq 'Y') {
-                        restart services
+                        Write-Host -ForegroundColor Green "Restarting services"
+                        Get-Service HuntressAgent -ErrorAction SilentlyContinue | Stop-Service | Start-Service
+                        Write-Host -ForegroundColor Green "Services restarted"
                     } # if 'Y'
                     elseif ($RS -eq 'N') {
                         Write-Host "NOT restarting services.`Exiting script."
@@ -481,13 +513,15 @@ function Get-HuntressInfo {
                         foreach ($L in $Log) {
                             if ($L -like '*x509: certificate signed by unknown authority*') {
                                 $IssueStillPresent = $True
-                                Write-Warning "'Certificate signed by unknown authority' error still present. Restarting services did not resolve the issue. Please look into this manually."
+                                Write-Warning "'Certificate signed by unknown authority' error still present. Restarting services did not resolve the issue. Please wait a bit for the log file to generate more logs and check again (the monitor only looks at the last few lines of the log file). Otherwise please look into this manually."
                                 break
                             } # if issue still present
                         } # foreach $L in $Log in updated log
                         if (!$IssueStillPresent) {
                             Write-Host -ForegroundColor Green "Issue is resolved"
                         }
+                        # the following break exists the loop after services were restarted but issue is still present, without restarting services once for each line in the log file
+                        break
                     } # if $Answer -eq 'Y'
                     elseif ($Answer -eq 'N') {
                         Write-Host -ForegroundColor Green "Not restarting services"
