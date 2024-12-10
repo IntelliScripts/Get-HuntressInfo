@@ -39,9 +39,13 @@ function Get-HuntressInfo {
 
         [Switch]$TestServerConnection,
 
+        [Switch]$TestHuntressConnection,
+
         [Switch]$DefaultOverride,
 
         [Switch]$OpenHuntressLog,
+
+        [Switch]$OpenTestHuntressConnectionLog,
 
         [Switch]$OpenIE
     )
@@ -53,8 +57,24 @@ function Get-HuntressInfo {
         # $Host.PrivateData.WarningForegroundColor = "Green"
 
         if ($OpenHuntressLog) {
-            notepad.exe C:\Program Files\Huntress\HuntressAgent.log
-            break
+            if (Test-Path "C:\Program Files\Huntress\HuntressAgent.log") {
+                notepad.exe "C:\Program Files\Huntress\HuntressAgent.log"    
+            }
+            else {
+                Write-Host -ForegroundColor Green "The 'HuntressAgent.log' file is not present on this machine.`nExiting the script."
+                break
+            }
+        }
+
+        if ($OpenTestHuntressConnectionLog) {
+            if (Test-Path C:\Windows\Temp\TestHuntressConnection.log) {
+                notepad.exe C:\Windows\Temp\TestHuntressConnection.log
+                break
+            }
+            else {
+                Write-Host -ForegroundColor Yellow "TestHuntressConnection log file not present on the machine."
+                break
+            }
         }
 
         # for testing the huntress.io cert backstage in IE
@@ -109,7 +129,7 @@ function Get-HuntressInfo {
                 
                 if ($PromptForParams) {
                     if ( !(($RegInfo.AccountKey) -and ($RegInfo.OrganizationKey) -and ($RegInfo.Tags)) ) {
-                        Write-Host -ForegroundColor Green "Failed to successfully pull the install parameters from the Registry. Please enter them manually:"
+                        Write-Host -ForegroundColor Green "Failed to successfully pull the install parameters from the Registry. Please enter them manually."
                         [String]$Script:ACTkey = (Read-Host "Enter our organizational Huntress account key")
                         [String]$ORGKey = (Read-Host "Enter the client name as it appears in Automate (without quotes)")
                         [String]$Site = (Read-Host "Enter the location name as it appears in Automate [for ex. Main] (without quotes)")
@@ -254,27 +274,38 @@ function Get-HuntressInfo {
 
         function Test-HuntressConnection {
             # test for unexpected huntress.io cert
-            Write-Verbose "Testing connection to huntress.io for SSL interception using the TestHuntressConnection command-line tool"
-            if (!(Test-Path "C:\Windows\Temp\TestHuntressConnection.exe")) {
-                Write-Verbose "Tool not present at 'C:\Windows\Temp\TestHuntressConnection.exe'. Dowloading tool from our LTShare.."
-                (New-Object Net.WebClient).DownloadFile("https://labtech.intellicomp.net/labtech/transfer/Tools/TestHuntressConnection.exe", "C:\Windows\Temp\TestHuntressConnection.exe")
-                if (Test-Path "C:\Windows\Temp\TestHuntressConnection.exe") {
-                    Write-Verbose "Download complete"
+            Write-Verbose "Testing connection to huntress.io for SSL interception using the HuntressSupport.exe command-line tool"
+            if (!(Test-Path "C:\Windows\Temp\HuntressSupport.exe")) {
+                Write-Verbose "Tool not present at 'C:\Windows\Temp\HuntressSupport.exe'. Dowloading tool from Huntress.."
+                #(New-Object Net.WebClient).DownloadFile("https://labtech.intellicomp.net/labtech/transfer/Tools/HuntressSupport.exe", "C:\Windows\Temp\HuntressSupport.exe")
+                # https://support.huntress.io/hc/en-us/articles/4404005175187-Deep-Packet-Inspection-TLS-SSL-Interception-Cert-Pinning
+                (New-Object Net.WebClient).DownloadFile("https://support.huntress.io/hc/en-us/article_attachments/29111852056339", "C:\Windows\Temp\HuntressSupport.exe")
+                if (Test-Path "C:\Windows\Temp\HuntressSupport.exe") {
+                    if ((Get-Item "C:\Windows\Temp\HuntressSupport.exe").Length -lt 2000) {
+                        Write-Verbose "Download corrupt. Check the file contents. The download may have been blocked bya third party filter or firewall."
+                    }
+                    else {
+                        Write-Verbose "Download complete"
+                    }
                 }
                 else {
                     Write-Verbose "Download not successful"
                 }
             }
-            $TestHuntressConnection = & "C:\Windows\Temp\TestHuntressConnection.exe"
-            Write-Host -ForegroundColor Green "`nResults from the TestHuntressConnection command-line tool:"
-            if (($TestHuntressConnection | Select-String "- Connection") -notlike "*Connection Successful*") {
+            Write-Host -ForegroundColor Green "`nFiltered results from the HuntressSupport command-line tool:`n(Log file is located at: $((Get-Location).Path)huntress_network_test.log)"
+            $TestHuntressConnection = (& "C:\Windows\Temp\HuntressSupport.exe" connect)
+            $TestHuntressConnection[0..26]
+            <#
+            if ($TestHuntressConnection | Select-String -Pattern "- Connection failed") {
                 Write-Warning "Huntress Connection Test failed"
-                $TestHuntressConnection | Where-Object { $_ -notmatch "Please see" -and $_ -notmatch "For help" }
+                $TestHuntressConnection | Select-String -Pattern "Please see", "For help", "Attempting", "Issuer", "Subject" -notmatch | Select-Object -ExpandProperty Line -Unique # Select-Object is needed for formatting purposes
             } # if $TestHuntressConnection not successful
             elseif ( ($TestHuntressConnection | Select-String "- Connection") -like "*Connection Successful*" ) {
-                $TestHuntressConnection
+                # $TestHuntressConnection | Where-Object { $_ -notmatch "Please see" -and $_ -notmatch "For help" -and $_ -notmatch "Attempting" }
+                $TestHuntressConnection | Select-String -Pattern "Please see", "For help", "Attempting", "Issuer", "Subject" -notmatch | Select-Object -ExpandProperty Line -Unique # Select-Object is needed for formatting purposes
             } # if $TestHuntressConnection successful
-        }
+            #>
+        } # function Test-HuntressConnection
 
         function Test-SSL {
             param (
@@ -295,16 +326,16 @@ function Get-HuntressInfo {
             Write-Verbose "Testing the SSL cert returned by the huntress.io domain"
             # Allow connection to sites with an invalid certificate
             # [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-            # Create the web request
+            # Create a web request object
             $req = [Net.HttpWebRequest]::Create($url)
             # Set the timeout to 5 seconds
             $timeoutMilliseconds = 5000
             $req.Timeout = $timeoutMilliseconds
-            # Populate the $req.ServicePoint.Certificate property
+            # Populate the $req.ServicePoint.Certificate property by getting the response from the website
             try { $req.GetResponse() | Out-Null } catch {}
             # Grab the cert issuer
             if ($req.ServicePoint.Certificate) {
-                $Script:Issuer = (($req.ServicePoint.Certificate.Issuer.Split(',')) | Select-String "O=").ToString().Substring(3)   
+                try { $Script:Issuer = (($req.ServicePoint.Certificate.Issuer.Split(',')) | Select-String "O=").ToString().Substring(3) } catch {}
             }
             Write-Debug "Huntress.io cert issuer info retrieved.`n$Issuer"
             if ($OutputObj) {
@@ -342,6 +373,7 @@ function Get-HuntressInfo {
 
         # else {
         if ( (Get-Process HuntressInstaller -ErrorAction SilentlyContinue).Count -gt 1 ) {
+            Get-Process Huntress*, *RIO* | Sort-Object StartTime | Select-Object Name, Description, ProductVersion, StartTime, Id | Format-Table -AutoSize
             Write-Host -ForegroundColor Red "Multiple instances of the Huntress Installer were detected."
             $Answer = Read-Host "Stop the installers? (Y/N)"
             if ($Answer -eq 'Y') {
@@ -361,7 +393,7 @@ function Get-HuntressInfo {
 
         Write-Verbose "Retrieving services, processes and Registry info"
         $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType -AutoSize
-        $Processes = Get-Process Huntress* | Select-Object Name, Description, @{n = "AgentVersion"; e = { $_.FileVersion } }, StartTime | Format-Table -AutoSize
+        $Processes = Get-Process Huntress*, *RIO* | Select-Object Name, Description, ProductVersion, StartTime, Id | Format-Table -AutoSize
         Write-Host -ForegroundColor Green "Huntress Services:"
         $Services
         if (!(Get-Service Huntress*)) {
@@ -369,7 +401,7 @@ function Get-HuntressInfo {
         }
         Write-Host -ForegroundColor Green "Huntress Processes:"
         $Processes
-        if (!(Get-Process Huntress*)) {
+        if (!(Get-Process Huntress*, *RIO*)) {
             Write-Host "No Huntress processes running.`n"
         }
         Write-Host -ForegroundColor Green "Huntress info pulled from the Registry:"
@@ -408,7 +440,7 @@ function Get-HuntressInfo {
                 $ProgressPreference = 'Continue'
             }
             catch [System.Net.WebException] {
-                Write-Warning "The Huntress site appears to be down. The machine will not be able to reach out for updates etc."
+                Write-Warning "The Huntress site cannot be reached. The machine will not be able to reach out for updates etc."
             }
             if ($Var.Content -notmatch "<title>Huntress Management Console</title>") {
                 Write-Warning "The machine cannot successfully reach the Huntress update site."
@@ -417,7 +449,7 @@ function Get-HuntressInfo {
             # test for ARM processor
             Write-Verbose "Testing for ARM Processor"
             if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
-                if ((Get-CimInstance Win32_Processor -Verbose:$false).Caption -like "*arm*") {
+                if ((Get-CimInstance Win32_Processor -Verbose:$false -ErrorAction SilentlyContinue).Caption -like "*arm*") {
                     Write-Warning "ARM processor detected. Huntress is not compatible with this machine."
                     Write-Host "For more info: 'https://support.huntress.io/hc/en-us/articles/4410699983891-Supported-Operating-Systems-System-Requirements-Compatibility'`n"
                 } 
@@ -434,7 +466,7 @@ function Get-HuntressInfo {
             if ($TestServerConnection) {      
                 # test for restrictions on outgoing communication on port 443
                 # requires PowerShell version 4.0+
-                Write-Verbose "Testing connectivity from the end point to Huntress's cloud servers"
+                Write-Verbose "Testing connectivity from the endpoint to Huntress's cloud servers"
                 Write-Host -ForegroundColor Green "`nConnectivity test results (on port 443):"
                 $ProgressPreference = 'SilentlyContinue'
                 @("huntresscdn.com", "update.huntress.io", "huntress.io", "eetee.huntress.io", "huntress-installers.s3.amazonaws.com", "huntress-updates.s3.amazonaws.com", "huntress-uploads.s3.us-west-2.amazonaws.com", "huntress-user-uploads.s3.amazonaws.com", "huntress-rio.s3.amazonaws.com", "huntress-survey-results.s3.amazonaws.com", "notify.bugsnag.com") | 
@@ -442,7 +474,9 @@ function Get-HuntressInfo {
                 $ProgressPreference = 'Continue'
             }
 
-            Test-HuntressConnection
+            if ($TestHuntressConnection) {
+                Test-HuntressConnection
+            }
             
             Test-SSL
 
