@@ -58,12 +58,12 @@ function Get-HuntressInfo {
 
         if ($OpenHuntressLog) {
             if (Test-Path "C:\Program Files\Huntress\HuntressAgent.log") {
-                notepad.exe "C:\Program Files\Huntress\HuntressAgent.log"    
+                notepad.exe "C:\Program Files\Huntress\HuntressAgent.log" 
             }
             else {
                 Write-Host -ForegroundColor Green "The 'HuntressAgent.log' file is not present on this machine.`nExiting the script."
-                break
             }
+            break
         }
 
         if ($OpenTestHuntressConnectionLog) {
@@ -165,12 +165,26 @@ function Get-HuntressInfo {
                 Remove-Item -Path "HKLM:\SOFTWARE\Huntress Labs" -Recurse -Confirm:$false -ErrorAction SilentlyContinue
             }
             Write-Host -ForegroundColor Green "Huntress uninstall complete.`n"
+              
+            if ( ($UninstallHuntress -or $ReinstallHuntress) -and ( (Get-Service Huntress* -ErrorAction SilentlyContinue) -or (Get-Process Huntress* -ErrorVariable SilentlyContinue) ) ) {
+                Write-Warning "Huntress was NOT successfully uninstalled."
+                Write-Host ""
+                $Script:UninstallStatus = 1
+                Write-Debug "Holding at the end of the uninstall function, after the UninstallStatus variable is set."
+            }
         } # function Uninstall
 
         function Install {
             if ( !(Test-Path $($HuntressPath)) -or ((Get-ChildItem $HuntressPath).CreationTime -lt (Get-Date).AddDays(-60)) ) {
                 Write-Verbose "Huntress installer not present at 'C:\Windows\LTSvc\Packages\Huntress' or present but older than 60 days.`nDownloading the installer."
+                if (Get-Process HuntressInstaller -ErrorAction SilentlyContinue) {
+                    # Stopping running instances of the HuntressInstaller process, to avoid an exception occurring during the WebClient request
+                    Write-Verbose "Stopping running instances of the HuntressInstaller processes"
+                    Get-Process HuntressInstaller | Stop-Process -Force
+                    Get-Process HuntressInstaller -ErrorAction SilentlyContinue
+                }
                 (New-Object Net.WebClient).DownloadFile("https://huntress.io/download/$($ACTKey)", $env:temp + '/HuntressInstaller.exe')
+                Write-Debug "Download complete, not yet checked for corruption."
                 if ((Get-Content $env:temp\HuntressInstaller.exe) -match "WELCOME, PLEASE LOGIN") {
                     Write-Warning "The downloaded installer is corrupt and unreadable. Please double-check the organizational key you entered, and then re-run the script."
                     break
@@ -362,7 +376,14 @@ function Get-HuntressInfo {
         if ($ReinstallHuntress) {
             Get-RegInfo
             Uninstall
-            Install
+            if ($UninstallStatus -eq 1) {
+                Write-Debug "DEBUG - if UninstallStatus = 1"
+                Write-Host "Not proceeding with the reinstall.`nExiting script."
+                break
+            }
+            else {
+                Install
+            }
         } # if $ReinstallHuntress
 
         if ($RestartServices) {
@@ -394,6 +415,7 @@ function Get-HuntressInfo {
         Write-Verbose "Retrieving services, processes and Registry info"
         $Services = Get-Service Huntress* | Format-Table Name, DisplayName, Status, StartType -AutoSize
         $Processes = Get-Process Huntress*, *RIO* | Select-Object Name, Description, ProductVersion, StartTime, Id | Format-Table -AutoSize
+
         Write-Host -ForegroundColor Green "Huntress Services:"
         $Services
         if (!(Get-Service Huntress*)) {
