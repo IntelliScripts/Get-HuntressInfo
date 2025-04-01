@@ -97,6 +97,11 @@ function Get-HuntressInfo {
             }
         } # if not admin
 
+        # Check Huntress Tamper Protection Mode
+        if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Huntress\' -Name 'UninstallMode' -ErrorAction SilentlyContinue).UninstallMode -eq 1) {
+            $ProtectionMode = 1
+        }
+
         $HuntressPath = 'C:\Windows\LTSvc\Packages\Huntress\HuntressInstaller.exe'
         $UninstallPath = "C:\Program Files\Huntress\Uninstall.exe"
         function Get-RegInfo {
@@ -116,6 +121,7 @@ function Get-HuntressInfo {
                     'ACCT key' = $RegInfo.AccountKey
                     'ORG key'  = $RegInfo.OrganizationKey
                     'Tags'     = $RegInfo.Tags
+                    # 'AgentId'  = $RegInfo.AgentId
                 }
                 Write-Debug "RegInfo Props gathered"
                 $Obj = New-Object -TypeName psobject -Property $Props
@@ -147,12 +153,23 @@ function Get-HuntressInfo {
         } # function Get-RegInfo
 
         function Uninstall {
-            Write-Host -ForegroundColor Green "Uninstalling Huntress.."
+            Write-Host -ForegroundColor Green "Uninstalling Huntress Agent.."
             if (Test-Path $UninstallPath) {
-                Start-Process -FilePath $($UninstallPath) -ArgumentList "/S"
-                Write-Verbose "Waiting for the uninstall to complete"
-                Start-Sleep -Seconds 20
-            }
+                try {
+                    $Process = Start-Process -FilePath $($UninstallPath) -ArgumentList "/S" -PassThru
+                    Write-Verbose "Waiting for the uninstall to complete"
+                    Start-Sleep -Seconds 20           
+                    # Check the exit code
+                    if ($Process.ExitCode -ne 0) {
+                        Write-Warning "Uninstallation failed with exit code: $($Process.ExitCode)"
+                    }
+                    # Uninstall RIO
+                    # Start-Process MsiExec.exe '/X{161997FB-692E-469A-9EBF-E5F35F68B059}'
+                }
+                catch {
+                    Write-Warning "Installation failed with error: $_"
+                }
+            } # if Test-Path
             else {
                 Write-Verbose "Huntress uninstaller not found. Attempting manuall uninstall"
                 Write-Verbose "Uninstalling HuntressAgent"
@@ -163,10 +180,10 @@ function Get-HuntressInfo {
                 Remove-Item -Path "C:\Program Files\Huntress" -Recurse -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Verbose "Deleting Huntress Registry info"
                 Remove-Item -Path "HKLM:\SOFTWARE\Huntress Labs" -Recurse -Confirm:$false -ErrorAction SilentlyContinue
-            }
+            } # if !Test-Path
             Write-Host -ForegroundColor Green "Huntress uninstall complete.`n"
               
-            if ( ($UninstallHuntress -or $ReinstallHuntress) -and ( (Get-Service Huntress* -ErrorAction SilentlyContinue) -or (Get-Process Huntress* -ErrorVariable SilentlyContinue) ) ) {
+            if ( ($UninstallHuntress -or $ReinstallHuntress) -and ( (Get-Service Huntress* -ErrorAction SilentlyContinue) -or (Get-Process Huntress* -ErrorAction SilentlyContinue) ) ) {
                 Write-Warning "Huntress was NOT successfully uninstalled."
                 Write-Host ""
                 $Script:UninstallStatus = 1
@@ -175,7 +192,9 @@ function Get-HuntressInfo {
         } # function Uninstall
 
         function Install {
-            if ( !(Test-Path $($HuntressPath)) -or ((Get-ChildItem $HuntressPath).CreationTime -lt (Get-Date).AddDays(-60)) ) {
+            if ( (!(Test-Path $($HuntressPath)) -or ((Get-ChildItem $HuntressPath).CreationTime -lt (Get-Date).AddDays(-60))) -and 
+                (!((Get-ChildItem $env:temp\HuntressInstaller.exe -ErrorAction SilentlyContinue).CreationTime -gt (Get-Date).AddDays(-60)))
+            ) {
                 Write-Verbose "Huntress installer not present at 'C:\Windows\LTSvc\Packages\Huntress' or present but older than 60 days.`nDownloading the installer."
                 if (Get-Process HuntressInstaller -ErrorAction SilentlyContinue) {
                     # Stopping running instances of the HuntressInstaller process, to avoid an exception occurring during the WebClient request
@@ -183,12 +202,16 @@ function Get-HuntressInfo {
                     Get-Process HuntressInstaller | Stop-Process -Force
                     Get-Process HuntressInstaller -ErrorAction SilentlyContinue
                 }
+                if (!$ACTKey) {
+                    Write-Host -ForegroundColor Green "Please enter your Huntress account key to download the installer."
+                    $ACTKey = Read-Host "Huntress account key"
+                }
                 (New-Object Net.WebClient).DownloadFile("https://huntress.io/download/$($ACTKey)", $env:temp + '/HuntressInstaller.exe')
                 Write-Debug "Download complete, not yet checked for corruption."
                 if ((Get-Content $env:temp\HuntressInstaller.exe) -match "WELCOME, PLEASE LOGIN") {
-                    Write-Warning "The downloaded installer is corrupt and unreadable. Please double-check the organizational key you entered, and then re-run the script."
+                    Write-Warning "The downloaded installer is corrupt/unreadable. Please double-check the organizational key you entered, and then re-run the script."
                     break
-                }
+                }                
                 Write-Verbose "Download complete. Installer saved to $env:temp + '/HuntressInstaller.exe'."
                 Write-Verbose "Attempting to pull install parameters from the Registry (or from memory if the reinstall parameter was used)"
                 # the following if statement is added for when the Reinstall parameter is used and reg info exists, 
@@ -434,11 +457,17 @@ function Get-HuntressInfo {
         else {
             $RegInfo | Format-List
         }
+
         if ($($HuntressPath) -lt 50KB) {
             Write-Warning "`nThe installer is present at $($HuntressPath), but is smaller in size than it should be.`nA DNS filter may be blocking the Huntress installer from downloading. To confirm, examine the contents of the installer in notepad, or simply visit 'huntress.io' in a browser."
         }
 
+        if ($ProtectionMode -eq 1) {
+            Write-Host -ForegroundColor Cyan "Huntress Protection mode is enabled.`n"
+        }
+
         if (!$UninstallHuntress -and !$DefaultOverride) {
+            <# *no longer relevant*
             # Checking the check.log file
             Write-Verbose "Checking the 'Check.log' file for errors"
             if (Test-Path 'C:\Program Files\Huntress\Check.log' -ErrorAction SilentlyContinue) {
@@ -451,9 +480,10 @@ function Get-HuntressInfo {
                 } # if check.log errors
             } # if check.log file present
             else {
-                Write-Host -ForegroundColor Cyan "The check.log file is not present on the machine."
+                Write-Host -ForegroundColor Yellow "The check.log file is not present on the machine."
             } # if check.log file not present
-        
+            #>
+
             # Testing for the Huntress portal being down
             Write-Verbose "Checking that the Huntress portal is up and that the machine can reach the Huntress update servers"
             try {
@@ -612,4 +642,4 @@ function Get-HuntressInfo {
     } # Process
 
     end {}
-} # function
+} # function Get-HuntressInfo
