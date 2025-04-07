@@ -98,6 +98,7 @@ function Get-HuntressInfo {
         } # if not admin
 
         # Check Huntress Tamper Protection Mode
+        # https://support.huntress.io/hc/en-us/articles/34614410683795-Huntress-Agent-Tamper-Protection
         if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Huntress\' -Name 'UninstallMode' -ErrorAction SilentlyContinue).UninstallMode -eq 1) {
             $ProtectionMode = 1
         }
